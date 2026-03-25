@@ -87,7 +87,7 @@ pipeline {
         stage('Deploy to DEV (Local Docker)') {
             when {
                 expression { params.ACTION == 'Build & Deploy' }
-                branch 'develop'
+                branch 'main'
             }
             steps {
                 script {
