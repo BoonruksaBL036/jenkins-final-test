@@ -86,7 +86,6 @@ pipeline {
         }
 
         stage('Approve PROD') {
-            when { expression { params.ACTION == 'Build & Deploy' } }
             steps {
                 input message: "Deploy to PROD?"
             }
@@ -119,7 +118,7 @@ pipeline {
                         docker pull ${DOCKER_REPO}:${params.ROLLBACK_TAG}
                         docker stop ${app} || true
                         docker rm ${app} || true
-                        docker run -d -p ${port}:5000 --name ${app} ${DOCKER_REPO}:${params.ROLLBACK_TAG}
+                        docker run -d -p ${port}:5000 --name ${app} ${DaOCKER_REPO}:${params.ROLLBACK_TAG}
                     """
                 }
             }
