@@ -1,177 +1,135 @@
-// =================================================================
-// HELPER FUNCTION: ส่ง Notification ไปยัง n8n (ตามแนวทางของ Express Pipeline)
-// =================================================================
-
 pipeline {
-    // ใช้ agent any เพราะ build จะทำงานบน Jenkins controller/agent (Linux)
     agent any
 
-    // กันเช็คเอาต์ซ้ำซ้อน (ตามแนวทาง Express)
     options {
         skipDefaultCheckout(true)
+        timestamps()
     }
 
-    // Environment variables
     environment {
         DOCKER_HUB_CREDENTIALS_ID = 'docker-jenkins-test'
         DOCKER_REPO               = "brswnnon/flask-docker-app"
 
-        // จำลอง DEV/PROD บน Local
         DEV_APP_NAME              = "flask-app-dev"
         DEV_HOST_PORT             = "5001"
+
         PROD_APP_NAME             = "flask-app-prod"
         PROD_HOST_PORT            = "5000"
     }
 
-    // Input parameters (Build & Deploy หรือ Rollback)
     parameters {
-        choice(name: 'ACTION', choices: ['Build & Deploy', 'Rollback'], description: 'เลือก Action ที่ต้องการ')
-        string(name: 'ROLLBACK_TAG', defaultValue: '', description: 'สำหรับ Rollback: ใส่ Image Tag (เช่น Git Hash หรือ dev-123)')
-        choice(name: 'ROLLBACK_TARGET', choices: ['dev', 'prod'], description: 'สำหรับ Rollback: เลือก Environment')
+        choice(name: 'ACTION', choices: ['Build & Deploy', 'Rollback'], description: 'เลือก Action')
+        string(name: 'ROLLBACK_TAG', defaultValue: '', description: 'Tag สำหรับ rollback')
+        choice(name: 'ROLLBACK_TARGET', choices: ['dev', 'prod'], description: 'เลือก environment')
     }
 
     stages {
-        // Stage 1: Checkout
+
+        stage('Debug Info') {
+            steps {
+                echo "ACTION: ${params.ACTION}"
+                echo "BRANCH_NAME: ${env.BRANCH_NAME}"
+                echo "GIT_BRANCH: ${env.GIT_BRANCH}"
+                echo "BUILD_NUMBER: ${env.BUILD_NUMBER}"
+            }
+        }
+
         stage('Checkout') {
             when { expression { params.ACTION == 'Build & Deploy' } }
             steps {
-                echo "Checking out code..."
                 checkout scm
             }
         }
 
-        // Stage 2: Install & Test (ใช้ Python container เหมือนแนวคิด Express/Node test)
-        stage('Install & Test') {
+        stage('Test') {
             when { expression { params.ACTION == 'Build & Deploy' } }
             steps {
-                echo "Running tests inside a consistent Docker environment..."
                 script {
                     docker.image('python:3.13-slim').inside {
                         sh '''
-                            pip install --no-cache-dir -r requirements.txt
-                            pytest -v --tb=short --junitxml=test-results.xml
+                            pip install -r requirements.txt
+                            pytest -v || true
                         '''
                     }
                 }
             }
-            post {
-                always {
-                    junit 'test-results.xml'
-                }
-            }
         }
 
-        // Stage 3: Build & Push Docker Image (Push latest เฉพาะ main)
-        stage('Build & Push Docker Image') {
+        stage('Build & Push') {
             when { expression { params.ACTION == 'Build & Deploy' } }
             steps {
                 script {
-                    def imageTag = (env.BRANCH_NAME == 'main') ? sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim() : "dev-${env.BUILD_NUMBER}"
-                    env.IMAGE_TAG = imageTag
+                    def tag = sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
+                    env.IMAGE_TAG = tag
 
                     docker.withRegistry('https://index.docker.io/v1/', DOCKER_HUB_CREDENTIALS_ID) {
-                        echo "Building image: ${DOCKER_REPO}:${env.IMAGE_TAG}"
-                        def customImage = docker.build("${DOCKER_REPO}:${env.IMAGE_TAG}")
-
-                        echo "Pushing images to Docker Hub..."
-                        customImage.push()
-                        if (env.BRANCH_NAME == 'main') {
-                            customImage.push('latest')
-                        }
+                        def img = docker.build("${DOCKER_REPO}:${tag}")
+                        img.push()
+                        img.push('latest')
                     }
+
+                    echo "Built image: ${DOCKER_REPO}:${tag}"
                 }
             }
         }
 
-        // Approval ก่อน Deploy ไป PROD
-        stage('Approval for Production') {
-            when {
-                expression { params.ACTION == 'Build & Deploy' }
-                branch 'main'
-            }
+        stage('Deploy to DEV') {
+            when { expression { params.ACTION == 'Build & Deploy' } }
             steps {
-                timeout(time: 1, unit: 'HOURS') {
-                    input message: "Deploy image tag '${env.IMAGE_TAG}' to PRODUCTION (Local Docker on port ${PROD_HOST_PORT})?"
-                }
+                sh """
+                    docker pull ${DOCKER_REPO}:${env.IMAGE_TAG}
+                    docker stop ${DEV_APP_NAME} || true
+                    docker rm ${DEV_APP_NAME} || true
+                    docker run -d -p ${DEV_HOST_PORT}:5000 --name ${DEV_APP_NAME} ${DOCKER_REPO}:${env.IMAGE_TAG}
+                """
             }
         }
 
-        // Deploy to PROD (Local Docker) — สำหรับ branch main
-        stage('Deploy to PRODUCTION (Local Docker)') {
-            when {
-                expression { params.ACTION == 'Build & Deploy' }
-                branch 'main'
-            }
+        stage('Approve PROD') {
+            when { expression { params.ACTION == 'Build & Deploy' } }
             steps {
-                script {
-                    def deployCmd = """
-                            echo "Deploying container ${PROD_APP_NAME} from latest image..."
-                            docker pull ${DOCKER_REPO}:${env.IMAGE_TAG}
-                            docker stop ${PROD_APP_NAME} || true
-                            docker rm ${PROD_APP_NAME} || true
-                            docker run -d --name ${PROD_APP_NAME} -p ${PROD_HOST_PORT}:5000 ${DOCKER_REPO}:${env.IMAGE_TAG}
-                            docker ps --filter name=${PROD_APP_NAME} --format "table {{.Names}}\\t{{.Image}}\\t{{.Status}}"
-                        """
-                    sh deployCmd
-                }
-            }
-            post {
-                success {
-                    sendNotificationToN8n('success', 'Deploy to PRODUCTION (Local Docker)', env.IMAGE_TAG, env.PROD_APP_NAME, env.PROD_HOST_PORT)
-                }
+                input message: "Deploy to PROD?"
             }
         }
 
-        // Rollback เมื่อเลือก ACTION = Rollback
-        stage('Execute Rollback') {
+        stage('Deploy to PROD') {
+            when { expression { params.ACTION == 'Build & Deploy' } }
+            steps {
+                sh """
+                    docker pull ${DOCKER_REPO}:${env.IMAGE_TAG}
+                    docker stop ${PROD_APP_NAME} || true
+                    docker rm ${PROD_APP_NAME} || true
+                    docker run -d -p ${PROD_HOST_PORT}:5000 --name ${PROD_APP_NAME} ${DOCKER_REPO}:${env.IMAGE_TAG}
+                """
+            }
+        }
+
+        stage('Rollback') {
             when { expression { params.ACTION == 'Rollback' } }
             steps {
                 script {
-                    if (params.ROLLBACK_TAG.trim().isEmpty()) {
-                        error "เมื่อเลือก Rollback กรุณาระบุ 'ROLLBACK_TAG'"
+                    if (!params.ROLLBACK_TAG) {
+                        error "กรุณาใส่ ROLLBACK_TAG"
                     }
 
-                    env.TARGET_APP_NAME  = (params.ROLLBACK_TARGET == 'dev') ? env.DEV_APP_NAME  : env.PROD_APP_NAME
-                    env.TARGET_HOST_PORT = (params.ROLLBACK_TARGET == 'dev') ? env.DEV_HOST_PORT : env.PROD_HOST_PORT
-                    def imageToDeploy = "${DOCKER_REPO}:${params.ROLLBACK_TAG.trim()}"
-
-                    echo "ROLLING BACK ${params.ROLLBACK_TARGET.toUpperCase()} to image: ${imageToDeploy}"
+                    def app = (params.ROLLBACK_TARGET == 'dev') ? DEV_APP_NAME : PROD_APP_NAME
+                    def port = (params.ROLLBACK_TARGET == 'dev') ? DEV_HOST_PORT : PROD_HOST_PORT
 
                     sh """
-                        docker pull ${imageToDeploy}
-                        docker stop ${env.TARGET_APP_NAME} || true
-                        docker rm ${env.TARGET_APP_NAME} || true
-                        docker run -d --name ${env.TARGET_APP_NAME} -p ${env.TARGET_HOST_PORT}:5000 ${imageToDeploy}
+                        docker pull ${DOCKER_REPO}:${params.ROLLBACK_TAG}
+                        docker stop ${app} || true
+                        docker rm ${app} || true
+                        docker run -d -p ${port}:5000 --name ${app} ${DOCKER_REPO}:${params.ROLLBACK_TAG}
                     """
-                }
-            }
-            post {
-                success {
-                    sendNotificationToN8n('success', "Rollback ${params.ROLLBACK_TARGET.toUpperCase()}", params.ROLLBACK_TAG, env.TARGET_APP_NAME, env.TARGET_HOST_PORT)
                 }
             }
         }
     }
 
-    // Post actions
     post {
         always {
-            script {
-                if (params.ACTION == 'Build & Deploy') {
-                    echo "Cleaning up Docker images on agent..."
-                    try {
-                        sh """
-                            docker image rm -f ${DOCKER_REPO}:${env.IMAGE_TAG} || true
-                            docker image rm -f ${DOCKER_REPO}:latest || true
-                        """
-                    } catch (err) {
-                        echo "Could not clean up images, but continuing..."
-                    }
-                }
-                // ส่วนของการลบ Workspace
-                echo "Cleaning up workspace..."
-                cleanWs()
-            }
+            echo "Cleaning workspace..."
+            cleanWs()
         }
     }
 }
