@@ -116,6 +116,7 @@ pipeline {
         }
 
         // Deploy to PROD (Local Docker) — สำหรับ branch main
+        // Deploy to PROD (Local Docker) — สำหรับ branch main
         stage('Deploy to PRODUCTION (Local Docker)') {
             when {
                 expression { params.ACTION == 'Build & Deploy' }
