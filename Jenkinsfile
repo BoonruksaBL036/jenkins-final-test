@@ -32,7 +32,6 @@ pipeline {
     }
 
     stages {
-        // Stage 1: Checkout
         stage('Checkout') {
             when { expression { params.ACTION == 'Build & Deploy' } }
             steps {
@@ -41,7 +40,6 @@ pipeline {
             }
         }
 
-        // Stage 2: Install & Test (ใช้ Python container เหมือนแนวคิด Express/Node test)
         stage('Install & Test') {
             when { expression { params.ACTION == 'Build & Deploy' } }
             steps {
@@ -62,7 +60,6 @@ pipeline {
             }
         }
 
-        // Stage 3: Build & Push Docker Image (Push latest เฉพาะ main)
         stage('Build & Push Docker Image') {
             when { expression { params.ACTION == 'Build & Deploy' } }
             steps {
@@ -84,8 +81,10 @@ pipeline {
             }
         }
 
-        // Deploy to DEV (Local Docker) — สำหรับ branch develop
         stage('Deploy to DEV (Local Docker)') {
+            when {
+                expression { params.ACTION == 'Build & Deploy' }
+            }
             steps {
                 script {
                     def deployCmd = """
@@ -99,15 +98,13 @@ pipeline {
                     sh deployCmd
                 }
             }
-            post {
-                success {
-                    sendNotificationToN8n('success', 'Deploy to DEV (Local Docker)', env.IMAGE_TAG, env.DEV_APP_NAME, env.DEV_HOST_PORT)
-                }
-            }
         }
 
-        // Approval ก่อน Deploy ไป PROD
+
         stage('Approval for Production') {
+            when {
+                expression { params.ACTION == 'Build & Deploy' }
+            }
             steps {
                 timeout(time: 1, unit: 'HOURS') {
                     input message: "Deploy image tag '${env.IMAGE_TAG}' to PRODUCTION (Local Docker on port ${PROD_HOST_PORT})?"
@@ -115,12 +112,9 @@ pipeline {
             }
         }
 
-        // Deploy to PROD (Local Docker) — สำหรับ branch main
-        // Deploy to PROD (Local Docker) — สำหรับ branch main
         stage('Deploy to PRODUCTION (Local Docker)') {
             when {
                 expression { params.ACTION == 'Build & Deploy' }
-                branch 'main'
             }
             steps {
                 script {
@@ -135,14 +129,9 @@ pipeline {
                     sh deployCmd
                 }
             }
-            post {
-                success {
-                    sendNotificationToN8n('success', 'Deploy to PRODUCTION (Local Docker)', env.IMAGE_TAG, env.PROD_APP_NAME, env.PROD_HOST_PORT)
-                }
-            }
         }
 
-        // Rollback เมื่อเลือก ACTION = Rollback
+
         stage('Execute Rollback') {
             when { expression { params.ACTION == 'Rollback' } }
             steps {
@@ -165,12 +154,8 @@ pipeline {
                     """
                 }
             }
-            post {
-                success {
-                    sendNotificationToN8n('success', "Rollback ${params.ROLLBACK_TARGET.toUpperCase()}", params.ROLLBACK_TAG, env.TARGET_APP_NAME, env.TARGET_HOST_PORT)
-                }
-            }
         }
+
     }
 
     // Post actions
@@ -188,13 +173,9 @@ pipeline {
                         echo "Could not clean up images, but continuing..."
                     }
                 }
-                // ส่วนของการลบ Workspace
                 echo "Cleaning up workspace..."
                 cleanWs()
             }
-        }
-        failure {
-            sendNotificationToN8n('failed', 'Pipeline Failed', 'N/A', 'N/A', 'N/A')
         }
     }
 }
